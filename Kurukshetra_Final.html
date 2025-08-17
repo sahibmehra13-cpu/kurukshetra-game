@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Kurukshetra — Archer's Fury (Final)</title>
+<style>
+  :root{--bg:#071028;--panel:#0f1724;--accent:#eab308;--muted:#9aa4b2}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:linear-gradient(180deg,#071028,#021025)}
+  .wrap{display:flex;align-items:center;justify-content:center;padding:14px}
+  #game-wrap{width:100%;max-width:1100px;background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);box-shadow:0 12px 36px rgba(2,6,23,0.5);border-radius:12px;padding:12px}
+  canvas{display:block;width:100%;height:auto;border-radius:8px;background:linear-gradient(180deg,#071028,#04172b)}
+  .hud{display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .panel{background:rgba(255,255,255,0.03);padding:10px;border-radius:8px;min-width:130px}
+  .meter{height:12px;background:rgba(255,255,255,0.06);border-radius:6px;overflow:hidden}
+  .meter > i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#ffdd57);}
+  .small{font-size:13px;color:var(--muted)}
+  button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#0b1020;font-weight:700;cursor:pointer}
+  .hint{font-size:13px;color:var(--muted);margin-top:6px}
+  @media(max-width:520px){#game-wrap{padding:6px}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="game-wrap">
+      <canvas id="game" width="960" height="600"></canvas>
+
+      <div class="hud">
+        <div class="panel">
+          <div style="font-weight:700">Score: <span id="score">0</span></div>
+          <div class="small">Wave: <span id="wave">0</span> · Lives: <span id="lives">12</span></div>
+        </div>
+
+        <div class="panel">
+          <div style="font-weight:700">Divya Astra</div>
+          <div class="meter"><i id="astraMeter"></i></div>
+          <div class="small">Press <strong>SPACE</strong> when full</div>
+        </div>
+
+        <div class="panel" style="flex:1">
+          <div style="font-weight:700">Controls</div>
+          <div class="small">Click & drag (or touch) to aim, release to fire. <strong>P</strong> pause · <strong>R</strong> restart</div>
+          <div class="hint">Tip: Aim slightly above enemies to account for arrow drop.</div>
+        </div>
+
+        <div class="panel">
+          <div style="font-weight:700">High Score</div>
+          <div id="best" class="small">0</div>
+          <div style="margin-top:8px"><button id="restartBtn">Restart</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Kurukshetra — Archer's Fury (Final)
+  - Single-file playable offline
+  - Long-play: game ends only when lives = 0
+  - Enemies vanish immediately when killed
+  - Divya Astra special effect
+  - Touch + mouse supported
+  - Uses canvas-drawn realistic-style player (offline)
+*/
+
+(function(){
+  const LOG_W = 960, LOG_H = 600;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // Responsive pixel backing
+  function fit(){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.max(360, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(220, Math.floor(rect.width * (LOG_H/LOG_W) * dpr));
+  }
+  window.addEventListener('resize', fit);
+  setTimeout(fit, 20);
+
+  // HUD nodes
+  const scoreEl = document.getElementById('score');
+  const waveEl  = document.getElementById('wave');
+  const livesEl = document.getElementById('lives');
+  const astraEl = document.getElementById('astraMeter');
+  const bestEl  = document.getElementById('best');
+  const restartBtn = document.getElementById('restartBtn');
+
+  // Game state
+  let score = 0, best = Number(localStorage.getItem('kuruk_best') || 0);
+  bestEl.textContent = best;
+  let wave = 0, lives = 12;
+  let arrows = [], enemies = [], particles = [];
+  let isAiming = false, aimPos = null;
+  let astra = 0;
+  let spawnTimer = 0, spawnInterval = 6.0;
+  let gameOver = false, paused = false;
+
+  const player = {x: LOG_W/2, y: LOG_H-82};
+
+  // Audio (safe)
+  let audioCtx = null;
+  function ensureAudio(){ if(!audioCtx){ try{ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ audioCtx=null; } } }
+  function beep(freq=700, t=0.06, type='sine'){ if(!audioCtx) return; const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type = type; o.frequency.value = freq; o.connect(g); g.connect(audioCtx.destination); g.gain.value = 0.0001; o.start(); g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime+t); o.stop(audioCtx.currentTime+t+0.02); }
+
+  // Helpers
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const rand = (a,b)=>Math.random()*(b-a)+a;
+
+  // Arrow class
+  function Arrow(x,y,vx,vy,isAstra){
+    this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.rot=Math.atan2(vy,vx);
+    this.isAstra = !!isAstra; this.age = 0; this.active = true;
+  }
+  Arrow.prototype.update = function(dt){
+    if(!this.active) return;
+    this.vy += 700*dt;
+    this.x += this.vx*dt; this.y += this.vy*dt;
+    this.rot = Math.atan2(this.vy, this.vx);
+    this.age += dt;
+    if(this.y > LOG_H + 140 || this.x < -220 || this.x > LOG_W + 220) this.active = false;
+  };
+  Arrow.prototype.draw = function(g){
+    if(!this.active) return;
+    g.save(); g.translate(this.x, this.y); g.rotate(this.rot);
+    // shaft
+    g.fillStyle = '#4b3b2b'; g.fillRect(-18,-2,36,4);
+    // fletch
+    g.fillStyle = '#dbeafe'; g.beginPath(); g.moveTo(-16,-6); g.lineTo(-10,0); g.lineTo(-16,6); g.closePath(); g.fill();
+    // head
+    g.fillStyle = '#a16207'; g.beginPath(); g.moveTo(18,-5); g.lineTo(26,0); g.lineTo(18,5); g.closePath(); g.fill();
+    // astra glow
+    if(this.isAstra){ g.globalAlpha = 0.14*(0.8+0.3*Math.sin(this.age*20)); g.fillStyle='#ffd166'; g.beginPath(); g.arc(8,0,12,0,Math.PI*2); g.fill(); g.globalAlpha = 1; }
+    g.restore();
+  };
+
+  // Enemy class
+  function Enemy(x,y,hp,speed){
+    this.x=x; this.y=y; this.w=46; this.h=56; this.hp=hp; this.maxHp=hp; this.speed=speed; this.alive=true;
+  }
+  Enemy.prototype.update = function(dt){
+    if(!this.alive) return;
+    this.y += this.speed*dt;
+    if(this.y > LOG_H - 92 && this.alive){
+      this.alive = false;
+      lives = Math.max(0, lives - 1);
+      spawnParticles(this.x, this.y, 12, '#ffb4b4');
+      beep(220, 0.12, 'sine');
+    }
+  };
+  Enemy.prototype.draw = function(g){
+    if(!this.alive) return;
+    g.save(); g.translate(this.x, this.y);
+    // shadow
+    g.fillStyle = 'rgba(0,0,0,0.25)'; g.beginPath(); g.ellipse(0, this.h/2 + 8, 24, 8, 0, 0, Math.PI*2); g.fill();
+    // torso
+    g.fillStyle = '#8b7b6f'; g.fillRect(-16, -20, 32, 36);
+    // head
+    g.fillStyle = '#f4d06f'; g.beginPath(); g.arc(0, -32, 10, 0, Math.PI*2); g.fill();
+    // helmet
+    g.fillStyle = '#8b2d2d'; g.fillRect(-16,-40,32,8);
+    // spear
+    g.strokeStyle = '#6b7280'; g.lineWidth=4; g.beginPath(); g.moveTo(20,-10); g.lineTo(36,-44); g.stroke();
+    // hp bar
+    g.fillStyle = 'rgba(0,0,0,0.45)'; g.fillRect(-24,-62,48,6);
+    g.fillStyle = '#60a5fa'; g.fillRect(-24,-62,48*(this.hp/this.maxHp),6);
+    g.restore();
+  };
+
+  // Particles
+  function Particle(x,y,vx,vy,life,col){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.max=life; this.col=col; }
+  Particle.prototype.update = function(dt){ this.vy += 500*dt; this.x += this.vx*dt; this.y += this.vy*dt; this.life -= dt; };
+  Particle.prototype.draw = function(g){ if(this.life<=0) return; g.globalAlpha = this.life/this.max; g.fillStyle = this.col; g.fillRect(this.x-2,this.y-2,4,4); g.globalAlpha = 1; };
+  function spawnParticles(x,y,n,col){ for(let i=0;i<n;i++){ particles.push(new Particle(x+rand(-14,14), y+rand(-14,14), rand(-180,180), rand(-260,-40), rand(0.35,1.0), col || '#ffd166')); } }
+
+  // Spawning & progression
+  function spawnWave(){
+    wave++; waveEl.textContent = wave;
+    const count = Math.min(9, 3 + Math.floor(wave * 0.55));
+    const hp = 1 + Math.floor(wave / 6);
+    const baseSpeed = 16 + wave * 1.2;
+    for(let i=0;i<count;i++){
+      const x = rand(60, LOG_W - 60);
+      const y = -rand(120, 520) - i * 38;
+      const speed = Math.min(60, rand(baseSpeed - 6, baseSpeed + 8));
+      enemies.push(new Enemy(x, y, hp, speed));
+    }
+  }
+
+  // Collisions
+  function collide(){
+    for(const a of arrows){
+      if(!a.active) continue;
+      for(const e of enemies){
+        if(!e.alive) continue;
+        const tipX = a.x + Math.cos(a.rot)*20;
+        const tipY = a.y + Math.sin(a.rot)*20;
+        if(tipX > e.x - e.w/2 && tipX < e.x + e.w/2 && tipY > e.y - e.h/2 && tipY < e.y + e.h/2){
+          e.hp -= a.isAstra ? 2 : 1;
+          a.active = false;
+          spawnParticles(tipX, tipY, a.isAstra ? 20 : 8, a.isAstra ? '#ffe39a' : '#ffd166');
+          beep(a.isAstra ? 1100 : 880, 0.055, a.isAstra ? 'sine' : 'square');
+          if(e.hp <= 0){
+            e.alive = false; score += 10; astra = clamp(astra + 10, 0, 100);
+            spawnParticles(e.x, e.y, 20, '#ffd166'); beep(420, 0.08, 'triangle');
+          }
+          if(a.isAstra) createAstraExplosion(tipX, tipY);
+        }
+      }
+    }
+    arrows = arrows.filter(a=>a.active);
+    enemies = enemies.filter(e=>e.alive);
+  }
+
+  // Divya Astra
+  function useAstra(){
+    if(astra < 100) return;
+    astra = 0; astraEl.style.width = '0%';
+    for(let i=0;i<28;i++){
+      const x = rand(40, LOG_W-40), y = rand(-820, -40);
+      const vx = rand(-40,40), vy = rand(240,480);
+      const a = new Arrow(x,y,vx,vy,true); arrows.push(a);
+    }
+    beep(1000,0.2,'sine');
+  }
+  function createAstraExplosion(x,y){ for(let i=0;i<40;i++) particles.push(new Particle(x+rand(-28,28), y+rand(-28,28), rand(-280,280), rand(-360,-80), rand(0.5,1.3), '#ffd166')); }
+
+  // Input handling
+  function toLogical(e){
+    const r = canvas.getBoundingClientRect();
+    const ev = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return { x: (ev.clientX - r.left) * (LOG_W / r.width), y: (ev.clientY - r.top) * (LOG_H / r.height) };
+  }
+  function fireAt(p){
+    const from = {x: player.x, y: player.y - 34};
+    const dx = from.x - p.x, dy = from.y - p.y;
+    const dist = Math.hypot(dx,dy);
+    const power = clamp(dist/190, 0.06, 1.9);
+    const angle = Math.atan2(dy,dx) + Math.PI;
+    const speed = 520 * power;
+    arrows.push(new Arrow(from.x + Math.cos(angle)*36, from.y + Math.sin(angle)*36, Math.cos(angle)*speed, Math.sin(angle)*speed, false));
+    spawnParticles(from.x + Math.cos(angle)*18, from.y + Math.sin(angle)*18, 6, '#c7f9ff');
+    beep(680 - power * 200, 0.05, 'square');
+  }
+
+  canvas.addEventListener('mousedown', (ev)=>{ if(gameOver) return; ensureAudio(); isAiming = true; aimPos = toLogical(ev); });
+  canvas.addEventListener('mousemove', (ev)=>{ if(!isAiming) return; aimPos = toLogical(ev); });
+  window.addEventListener('mouseup', (ev)=>{ if(!isAiming) return; isAiming = false; fireAt(toLogical(ev)); });
+
+  canvas.addEventListener('touchstart', (ev)=>{ ev.preventDefault(); if(gameOver) return; ensureAudio(); isAiming=true; aimPos = toLogical(ev); });
+  canvas.addEventListener('touchmove', (ev)=>{ ev.preventDefault(); if(!isAiming) return; aimPos = toLogical(ev); });
+  window.addEventListener('touchend', (ev)=>{ if(!isAiming) return; isAiming=false; fireAt(aimPos || {x:player.x, y:player.y-40}); });
+
+  window.addEventListener('keydown', (e)=>{ if(e.code==='Space'){ e.preventDefault(); useAstra(); } if(e.key==='p'||e.key==='P'){ paused=!paused; } if(e.key==='r'||e.key==='R'){ restart(); }});
+  restartBtn.addEventListener('click', restart);
+
+  // Draw player (realistic-style canvas painting approximation — offline)
+  function drawChariot(g,x,y){
+    g.save(); g.translate(x,y);
+    // wheels
+    g.fillStyle = '#2b2b2b'; g.beginPath(); g.arc(-80,40,30,0,Math.PI*2); g.fill(); g.beginPath(); g.arc(80,40,30,0,Math.PI*2); g.fill();
+    // body
+    g.fillStyle = '#6b3aed'; g.fillRect(-120,-20,240,80);
+    g.restore();
+  }
+  function drawArjuna(g,x,y){
+    // stylized, but richer: layered clothing, face shading, bow visible
+    g.save(); g.translate(x,y);
+    // torso/cloth
+    g.fillStyle='#f0d58c'; g.fillRect(-22,-56,44,56);
+    g.fillStyle='#a24e1a'; g.fillRect(-22,-10,44,30);
+    // head
+    g.beginPath(); g.fillStyle='#f4d06f'; g.arc(0,-74,14,0,Math.PI*2); g.fill();
+    // hair/helmet
+    g.fillStyle='#2d2d2d'; g.fillRect(-16,-86,32,8);
+    // bow (curved)
+    g.strokeStyle='#4b3b2b'; g.lineWidth=5; g.beginPath(); g.moveTo(-6,-50); g.quadraticCurveTo(-72,-20,-6,40); g.stroke();
+    // nocked arrow
+    g.strokeStyle='#b66d12'; g.lineWidth=2; g.beginPath(); g.moveTo(10,-20); g.lineTo(-6,0); g.stroke();
+    g.restore();
+  }
+
+  // Game loop
+  let last = performance.now();
+  function update(){
+    const now = performance.now(); const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if(!gameOver && !paused){
+      arrows.forEach(a=>a.update(dt));
+      enemies.forEach(e=>e.update(dt));
+      particles.forEach(p=>p.update(dt));
+      particles = particles.filter(p=>p.life>0);
+      collide();
+
+      // spawn pacing: faster if empty
+      if(enemies.length === 0) spawnTimer += dt * 2.0; else spawnTimer += dt;
+      if(spawnTimer >= spawnInterval){ spawnTimer = 0; spawnWave(); spawnInterval = Math.max(4.0, spawnInterval - 0.12); }
+
+      astra = clamp(astra + 0.08, 0, 100);
+
+      if(lives <= 0){
+        gameOver = true;
+        best = Math.max(best, score);
+        localStorage.setItem('kuruk_best', best);
+        bestEl.textContent = best;
+      }
+      updateHUD();
+    }
+    render();
+    requestAnimationFrame(update);
+  }
+
+  function updateHUD(){ scoreEl.textContent = score; waveEl.textContent = wave; livesEl.textContent = lives; astraEl.style.width = astra + '%'; }
+
+  function render(){
+    // scale to logical coordinate system
+    const sx = canvas.width / LOG_W, sy = canvas.height / LOG_H;
+    ctx.save(); ctx.scale(sx, sy);
+
+    // background
+    const g = ctx.createLinearGradient(0,0,0,LOG_H); g.addColorStop(0,'#071028'); g.addColorStop(0.9,'#042034');
+    ctx.fillStyle = g; ctx.fillRect(0,0,LOG_W,LOG_H);
+    // ground and hills
+    ctx.fillStyle = '#072033'; ctx.fillRect(0,LOG_H-110,LOG_W,110);
+    ctx.fillStyle='rgba(10,30,40,0.35)'; ctx.beginPath(); ctx.ellipse(140,LOG_H-160,200,60,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(760,LOG_H-150,240,70,0,0,Math.PI*2); ctx.fill();
+
+    // draw chariot and arjuna
+    drawChariot(ctx, player.x, player.y);
+    drawArjuna(ctx, player.x - 28, player.y - 12); // offset a bit for better composition
+
+    // draw arrows behind enemies
+    arrows.forEach(a=>a.draw(ctx));
+
+    // draw enemies and particles
+    enemies.forEach(e=>e.draw(ctx));
+    particles.forEach(p=>p.draw(ctx));
+
+    // aiming indicator
+    if(isAiming && aimPos){
+      ctx.save(); ctx.strokeStyle='rgba(255,255,255,0.8)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(player.x, player.y-36); ctx.lineTo(aimPos.x, aimPos.y); ctx.stroke();
+      const d = Math.min(180, Math.hypot(aimPos.x - player.x, aimPos.y - player.y));
+      ctx.beginPath(); ctx.arc(player.x, player.y-36, 10 + d*0.08, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+
+    // game over overlay
+    if(gameOver){
+      ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,LOG_W,LOG_H);
+      ctx.fillStyle='#ffd166'; ctx.font='36px serif'; ctx.textAlign='center';
+      ctx.fillText('GAME OVER', LOG_W/2, LOG_H/2 - 20);
+      ctx.fillStyle='#fff'; ctx.font='20px sans-serif'; ctx.fillText('Press R to Restart', LOG_W/2, LOG_H/2 + 18);
+    }
+
+    ctx.restore();
+  }
+
+  // External functions
+  function restart(){
+    score=0; wave=0; lives=12; arrows=[]; enemies=[]; particles=[]; astra=0; spawnTimer=0; spawnInterval=6.0; gameOver=false; paused=false;
+    last = performance.now();
+    spawnWave(); updateHUD();
+  }
+
+  // collision helper updated to remove enemies instantly (already done in collide())
+  // expose debug
+  window._kuruk = { restart, useAstra: ()=>{ if(astra>=100) useAstra(); } };
+
+  // initialize
+  spawnWave();
+  last = performance.now();
+  requestAnimationFrame(update);
+
+  // passive astra charge small timer
+  setInterval(()=>{ if(!gameOver && !paused) astra = clamp(astra + 0.09, 0, 100); }, 120);
+
+  // audio resume on first click for mobile browsers
+  canvas.addEventListener('click', ()=>{ ensureAudio(); if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); });
+
+})();
+</script>
+</body>
+</html>
